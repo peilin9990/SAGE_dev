@@ -4,6 +4,8 @@ SAGE Cluster Manager CLI
 统一的Ray集群管理工具
 """
 
+import os
+
 import typer
 
 from ...management.config_manager import get_config_manager
@@ -19,8 +21,85 @@ app.add_typer(worker_app, name="worker", help="👥 Worker节点管理")
 
 
 @app.command("start")
-def start_cluster():
+def start_cluster(
+    skip_ssh_check: bool = typer.Option(
+        False, "--skip-ssh-check", help="跳过SSH免密登录检查"
+    ),
+    ssh_password: str = typer.Option(
+        None, "--ssh-password", "-p", help="SSH密码（用于自动配置免密登录）"
+    ),
+):
     """启动整个Ray集群（Head + 所有Workers）"""
+    config_manager = get_config_manager()
+    workers = config_manager.get_workers_ssh_hosts()
+    ssh_config = config_manager.get_ssh_config()
+
+    # 0. SSH免密登录检查（仅当有worker节点时）
+    if workers and not skip_ssh_check:
+        typer.echo("🔐 第0步: 检查SSH免密登录...")
+
+        from .ssh_setup import auto_setup_ssh_keys, verify_passwordless_login
+
+        user = ssh_config.get("user", "sage")
+        key_path = ssh_config.get("key_path", "~/.ssh/id_rsa")
+        key_path = os.path.expanduser(key_path)
+
+        # 检查每个worker的SSH连接
+        failed_hosts = []
+        for host, port in workers:
+            if not verify_passwordless_login(host, user, key_path, port):
+                failed_hosts.append((host, port))
+
+        if failed_hosts:
+            typer.echo(
+                f"[yellow]⚠️  发现 {len(failed_hosts)} 个节点未配置免密登录:[/yellow]"
+            )
+            for host, port in failed_hosts:
+                typer.echo(f"   - {host}:{port}")
+
+            # 如果提供了密码，自动配置
+            if ssh_password:
+                typer.echo("\n[cyan]🔧 使用提供的密码自动配置SSH免密登录...[/cyan]")
+                success, total = auto_setup_ssh_keys(
+                    hosts=failed_hosts,
+                    user=user,
+                    password=ssh_password,
+                    key_path=key_path,
+                )
+                if success < total:
+                    typer.echo(
+                        f"[red]❌ SSH配置失败: {total - success} 个节点无法配置[/red]"
+                    )
+                    typer.echo(
+                        "[yellow]提示: 使用 --skip-ssh-check 跳过检查，或手动配置SSH[/yellow]"
+                    )
+                    raise typer.Exit(1)
+            else:
+                # 交互式询问是否配置
+                typer.echo("\n[cyan]是否现在配置SSH免密登录？[/cyan]")
+                try:
+                    password = typer.prompt(
+                        f"请输入SSH密码（用户: {user}）", hide_input=True
+                    )
+                    success, total = auto_setup_ssh_keys(
+                        hosts=failed_hosts,
+                        user=user,
+                        password=password,
+                        key_path=key_path,
+                    )
+                    if success < total:
+                        typer.echo(
+                            f"[red]❌ SSH配置失败: {total - success} 个节点无法配置[/red]"
+                        )
+                        raise typer.Exit(1)
+                except typer.Abort:
+                    typer.echo(
+                        "[yellow]\n⚠️  跳过SSH配置。使用 --skip-ssh-check 避免此检查[/yellow]"
+                    )
+                    raise typer.Exit(1)
+        else:
+            typer.echo("[green]✅ 所有节点SSH免密登录正常[/green]")
+
     typer.echo("🚀 启动Ray集群...")
 
     # 1. 启动Head节点
@@ -42,12 +121,7 @@ def start_cluster():
     # 2. 启动所有Worker节点
     typer.echo("第2步: 启动所有Worker节点")
     try:
-        from ...management.config_manager import get_config_manager
         from .worker import start_workers
-
-        # 检查是否配置了worker节点
-        config_manager = get_config_manager()
-        workers = config_manager.get_workers_ssh_hosts()
 
         if not workers:
             typer.echo("💡 未配置worker节点，跳过worker启动")
@@ -59,13 +133,13 @@ def start_cluster():
         typer.echo("💡 Head节点已启动，可尝试手动启动Worker节点")
         raise typer.Exit(1)
 
-    typer.echo("✅ Ray集群启动完成！")
+    typer.echo("✅ Ray集群启动完成!")
 
 
 @app.command("stop")
 def stop_cluster():
     """停止整个Ray集群（所有Workers + Head）"""
-    typer.echo("🛑 停止Ray集群...")
+    typer.echo("�� 停止Ray集群...")
 
     # 1. 先停止所有Worker节点
     typer.echo("第1步: 停止所有Worker节点")
@@ -92,7 +166,7 @@ def stop_cluster():
     except Exception as e:
         typer.echo(f"⚠️  Head节点停止遇到问题: {e}")
 
-    typer.echo("✅ Ray集群停止完成！")
+    typer.echo("✅ Ray集群停止完成!")
 
 
 @app.command("restart")
@@ -114,7 +188,7 @@ def restart_cluster():
     typer.echo("第2阶段: 启动集群")
     start_cluster()
 
-    typer.echo("✅ Ray集群重启完成！")
+    typer.echo("✅ Ray集群重启完成!")
 
 
 @app.command("status")
@@ -130,7 +204,7 @@ def status_cluster():
     dashboard_port = head_config.get("dashboard_port", 8265)
 
     # 1. 检查Head节点
-    typer.echo("\n🏠 Head节点状态:")
+    typer.echo("\n�� Head节点状态:")
     try:
         from .head import status_head
 
@@ -164,7 +238,7 @@ def deploy_cluster():
     success_count, total_count = deployment_manager.deploy_to_all_workers()
 
     if success_count == total_count:
-        typer.echo("✅ 集群部署成功！")
+        typer.echo("✅ 集群部署成功!")
     else:
         typer.echo(f"⚠️  部分节点部署失败 ({success_count}/{total_count})")
         raise typer.Exit(1)
